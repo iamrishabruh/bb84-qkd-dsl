@@ -1,109 +1,99 @@
-# Quantum Key Distribution Domain-Specific Language
+# BB84 DSL
 
-## Overview
-The **Quantum Key Distribution (QKD) DSL** is a Domain-Specific Language designed for simulating quantum cryptography and post-quantum cryptography algorithms. It provides cryptographers and developers with an intuitive platform for defining and testing quantum-safe cryptographic protocols, particularly focusing on QKD mechanisms.
+A small **programming-languages style** project: a domain-specific language for **classically simulating** the BB84 quantum key distribution protocol at a high level. The point of the repo is the **language pipeline** (lexer → parser → AST → interpreter) plus **tests**, **examples**, and honest documentation about what is modeled versus simplified.
 
-## Features
-- Specialized syntax Enables defining quantum cryptographic protocols with ease.
-- Quantum operations support for single and multi-qubit gates (Hadamard, CNOT).
-- Classical operations handle key sifting, eavesdropping detection, and hybrid quantum-classical operations.
-- Simulation tools test eavesdropping scenarios and security protocols.
-- Built modular to be easily adaptable for future developments in post-quantum cryptography.
+This is **not** quantum hardware firmware, a circuit simulator, or a production QKD stack. Treat it as a **pedagogical** tool for reasoning about basis choice, sifting, noise, and intercept–resend eavesdropping in a toy statistical model.
 
-## Grammar Overview
-The DSL uses a grammar defined in Extended Backus-Naur Form (EBNF) to support constructs for quantum operations, function definitions, conditional statements, and more.
+## What this DSL is for
 
-### Grammar Snippet
-```ebnf
-<program> ::= { <statement> }
+- Describe a batch of BB84-style rounds: Alice prepares random bits in random bases; Bob measures in bases you specify in the program.
+- Sift on matching bases, estimate disagreement on those rounds, and raise a simple **eavesdropping alarm** when the sift error rate crosses a threshold.
+- Experiment with **classical noise** on outcomes as a coarse stand-in for device error.
 
-<quantum_op> ::= "qubit" <identifier>
-               | <gate_op>
-               | <measurement>
+The implementation keeps quantum mechanics implicit: measurement statistics are encoded directly in the simulator, which keeps the interpreter small and the semantics easy to read in Python.
 
-<gate_op> ::= "h" <identifier>
-            | "x" <identifier>
-            | "y" <identifier>
-            | "z" <identifier>
-            | "cnot" <identifier> <identifier>
+## Example program
 
-<measurement> ::= "measure" <identifier> <identifier> [ "shots" "=" <number> ]
-```
+```text
+seed 4242
+error_threshold 0.15
+noise 0.0
+eavesdrop off
 
-## Example Usage
-```python
 qubit q1
-qubit q2
-h q1          # Apply Hadamard gate to q1
-x q2          # Apply Pauli-X gate to q2
-cnot q1 q2    # Apply CNOT gate
-measure q1 c1 shots=1024  # Measure q1 into c1 with 1024 shots
+alice_send q1
+bob_measure q1 rect
+
+sift_keys
+check_eavesdropping
+generate_key k1
+print k1
+print stats
 ```
 
-## Classical Operations
-```python
-alice_send q1            # Alice sends qubit q1
-bob_measure q1 c1        # Bob measures q1 into classical bit c1
-sift_keys                # Sift the keys
-check_eavesdropping      # Detect eavesdropping
-generate_key key1, 2, 256 # Generate 2 keys, each 256 bits
-```
+See also `examples/basic_bb84.dsl`, `examples/eavesdropping.dsl`, and `examples/noise_simulation.dsl`.
 
-## Functions and Control Structures
-```python
-function prepare_qubit(q, bit) {
-    if (bit == 1) {
-        x q
-    } else {
-        h q
-    }
-    alice_send q
-}
+## Language features
 
-call prepare_qubit(q1, 1)
-```
+- **Configuration**: `seed`, `noise`, `error_threshold`, `eavesdrop on|off`
+- **Protocol steps**: `qubit`, `alice_send`, `bob_measure … rect|diag`
+- **Post-processing**: `sift_keys`, `check_eavesdropping`, `generate_key`, `print`
+- **Front-end**: hand-written lexer, recursive-descent parser, explicit AST dataclasses, structured errors (`DSLLexError`, `DSLSyntaxError`, `DSLRuntimeError`)
 
-## Installation and Usage
+Full syntax is written out in EBNF in [`docs/grammar.md`](docs/grammar.md).
 
-1) Clone the repository:
+## Grammar
+
+The formal grammar lives in [`docs/grammar.md`](docs/grammar.md). The parser accepts the statement-oriented language sketched above; static well-formedness rules (for example, matching `alice_send` / `bob_measure` ordering) are enforced by the interpreter.
+
+## Interpreter architecture
+
+1. **`bb84dsl/lexer.py`** scans the source into `Token` values (line/column preserved for errors).
+2. **`bb84dsl/parser.py`** builds a `Program` of immutable AST nodes (`bb84dsl/ast.py`).
+3. **`bb84dsl/interpreter.py`** walks the AST and updates `SimulationState` (`bb84dsl/simulator.py`): rounds, sifting, key material, and the last error-rate / detection flags.
+4. **`bb84dsl/errors.py`** centralizes user-facing exceptions.
+
+There are **no third-party runtime dependencies**; the standard library is enough for the language and simulation loop.
+
+## Running examples
+
+Install in editable mode (optional, for local development):
+
 ```bash
-git clone https://github.com/iamrishabruh/PQC.git
-cd PQC
+pip install -e ".[dev]"
 ```
-2) Install required dependencies:
+
+Run a program:
+
 ```bash
-pip install -r requirements.txt
+python -m bb84dsl examples/basic_bb84.dsl
 ```
 
-3) Run the interpreter:
+Override the program’s `seed` statements from the CLI (file seeds are ignored when this flag is present):
+
 ```bash
-python main.py your_script.dsl
+python -m bb84dsl --seed 999 examples/basic_bb84.dsl
 ```
 
-Write your scripts in .dsl files and pass them to the interpreter.
+## Testing
 
-## Core Components
-- Parses DSL scripts into an Abstract Syntax Tree (AST).
-- Executes DSL statements, managing quantum operations and classical logic.
-- Command Module: Handles execution of quantum gates, measurements, and cryptographic functions.
+```bash
+pytest
+```
 
-## Future Enhancements
-- A real-time console for command testing.
-- Circuit visualization and measurement outcomes.
-- Connect the DSL with quantum hardware or simulators.
-- Simulate various eavesdropping strategies and analyze security.
+The suite covers tokenization, parsing (including invalid programs), BB84 sifting and intercept–resend statistics in `bb84dsl/simulator.py`, interpreter integration, and deterministic behavior under a fixed seed.
 
-## Contributing
-Contributions are welcome! Please follow these steps:
+## Simulation assumptions and limitations
 
-1) Fork the repository.
-2) Create a new branch for your feature or bugfix.
-3) Submit a pull request with a clear description of your changes.
+A dedicated discussion lives in [`docs/simulation.md`](docs/simulation.md). In short: the model is **classical**, **round-local**, and **not** a substitute for a full quantum formalism or security analysis—see the doc for the explicit simplifications (no joint quantum state, coarse noise, no privacy amplification, and so on).
+
+## Future work
+
+- Richer surface syntax (blocks, procedures, or explicit `for` loops over rounds) without hiding the pedagogical semantics.
+- Additional QKD toy models (B92, decoy-state style classical abstractions) sharing the same pipeline.
+- Optional visualization of basis matches / error rates per round.
+- Stricter separation of “language semantics” and “physics story” via pluggable simulation backends—still explicitly non-hardware.
 
 ## License
-This project is licensed under the MIT License.
 
-## Contact
-If you have any questions or feedback, feel free to reach out:
-
-Email: [rchouhan.network@gmail.com]
+MIT — see [`LICENSE`](LICENSE).

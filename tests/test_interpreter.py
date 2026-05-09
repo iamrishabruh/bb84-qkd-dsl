@@ -1,119 +1,99 @@
-# tests/test_interpreter.py
+"""End-to-end interpreter tests."""
 
-import unittest
-from dsl.interpreter import DSLInterpreter
+import io
+import sys
 
-class TestDSLInterpreter(unittest.TestCase):
-    def setUp(self):
-        self.interpreter = DSLInterpreter()
-    
-    def test_interpret_qubit_definition(self):
-        script = "qubit q0"
-        self.interpreter.interpret(script)
-        self.assertIn('q0', self.interpreter.commands.qubits)
-    
-    def test_interpret_apply_gates(self):
-        script = """
-        qubit q0
-        h q0
-        x q0
-        """
-        self.interpreter.interpret(script)
-        gates = [op[0].name for op in self.interpreter.commands.circuit.data]
-        self.assertIn('h', gates)
-        self.assertIn('x', gates)
-    
-    def test_interpret_measurement(self):
-        script = """
-        qubit q0
-        measure q0 c0
-        """
-        self.interpreter.interpret(script)
-        self.assertIn('c0', self.interpreter.commands.classical_bits)
-    
-    def test_interpret_alice_send_and_bob_measure(self):
-        script = """
-        qubit q0
-        alice_send q0
-        bob_measure q0 H
-        """
-        self.interpreter.interpret(script)
-        self.assertEqual(len(self.interpreter.commands.alice_bits), 1)
-        self.assertEqual(len(self.interpreter.commands.bob_bases), 1)
-        self.assertIn('c_q0', self.interpreter.commands.classical_bits)
-    
-    def test_interpret_sift_keys(self):
-        script = """
-        qubit q0
-        alice_send q0
-        bob_measure q0 H
-        sift_keys
-        """
-        self.interpreter.interpret(script)
-        self.assertEqual(len(self.interpreter.commands.shared_key), 1)
-    
-    def test_interpret_generate_key_and_print(self):
-        script = """
-        qubit q0
-        alice_send q0
-        bob_measure q0 H
-        sift_keys
-        generate_key k0
-        print k0
-        """
-        self.interpreter.interpret(script)
-        self.assertTrue(hasattr(self.interpreter.commands, 'k0'))
-        self.assertEqual(self.interpreter.commands.k0, '1')  # Depending on random bit
+import pytest
 
-    def test_interpret_full_bb84_protocol(self):
-        script = """
-        # BB84 Protocol Example
-        qubit q0
+from bb84dsl.interpreter import Interpreter, interpret_source
+from bb84dsl.parser import parse_source
+
+
+def _program(*, eve: bool) -> str:
+    eave = "eavesdrop on" if eve else "eavesdrop off"
+    return f"""
+    seed 12345
+    error_threshold 0.11
+    noise 0.0
+    {eave}
+
+    qubit q1
+    qubit q2
+    qubit q3
+    qubit q4
+
+    alice_send q1
+    alice_send q2
+    alice_send q3
+    alice_send q4
+
+    bob_measure q1 rect
+    bob_measure q2 diag
+    bob_measure q3 rect
+    bob_measure q4 diag
+
+    sift_keys
+    check_eavesdropping
+    generate_key k1
+    print stats
+    """
+
+
+def test_deterministic_same_seed_same_stats():
+    p = parse_source(_program(eve=False))
+    a = Interpreter().run(p)
+    b = Interpreter().run(p)
+    assert a.sift_error_rate == b.sift_error_rate
+    assert a.eavesdrop_detected == b.eavesdrop_detected
+    assert a.keys == b.keys
+
+
+def test_interpret_source_convenience():
+    lines = ["seed 1", "qubit q1"]
+    for _ in range(12):
+        lines.append("alice_send q1")
+    for _ in range(12):
+        lines.append("bob_measure q1 rect")
+    lines += [
+        "sift_keys",
+        "check_eavesdropping",
+        "generate_key k",
+    ]
+    out = interpret_source("\n".join(lines))
+    assert "k" in out.keys
+
+
+def test_override_seed_ignores_file_seed():
+    def make_src() -> str:
+        lines = ["seed 1", "qubit q1"]
+        for _ in range(16):
+            lines.append("alice_send q1")
+        for _ in range(16):
+            lines.append("bob_measure q1 rect")
+        lines += ["sift_keys", "check_eavesdropping", "generate_key k"]
+        return "\n".join(lines)
+
+    src = make_src()
+    a = interpret_source(src)
+    p = parse_source(src)
+    b = Interpreter(override_seed=999).run(p)
+    assert a.keys["k"] != b.keys["k"]
+
+
+def test_print_key_captured(monkeypatch):
+    prog = parse_source(
+        """
+        seed 10
         qubit q1
-        qubit q2
-
-        alice_send q0
         alice_send q1
-        alice_send q2
-
-        bob_measure q0 H
-        bob_measure q1 X
-        bob_measure q2 H
-
+        bob_measure q1 rect
         sift_keys
         check_eavesdropping
-        generate_key k0
-        print k0
+        generate_key kout
+        print kout
         """
-        self.interpreter.interpret(script)
-        self.assertTrue(hasattr(self.interpreter.commands, 'k0'))
-        self.assertGreaterEqual(len(self.interpreter.commands.shared_key), 0)
-    
-    def test_interpret_eavesdropping(self):
-        script = """
-        # BB84 Protocol with Eavesdropping
-        qubit q0
-        qubit q1
-        qubit q2
-
-        alice_send q0
-        alice_send q1
-        alice_send q2
-
-        eavesdrop
-
-        bob_measure q0 H
-        bob_measure q1 X
-        bob_measure q2 H
-
-        sift_keys
-        check_eavesdropping
-        generate_key k0
-        print k0
-        """
-        self.interpreter.interpret(script)
-        self.assertTrue(hasattr(self.interpreter.commands, 'k0'))
-        self.assertGreaterEqual(len(self.interpreter.commands.shared_key), 0)
-
-if __name__ == '__main__':
-    unittest.main()
+    )
+    buf = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", buf)
+    out = Interpreter().run(prog)
+    assert out.printed and "kout=" in out.printed[-1]
